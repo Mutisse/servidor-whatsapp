@@ -6,49 +6,106 @@ const path = require('path');
 const app = express();
 app.use(express.json());
 
+// Configuração melhorada do cliente
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({
+        clientId: "beautytime-client", // ID único para sessão
+        dataPath: "./sessions" // Pasta para salvar sessões
+    }),
     puppeteer: { 
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--single-process',
+            '--disable-gpu'
+        ]
+    },
+    webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
     }
 });
 
 let isReady = false;
 let qrCodeImage = null;
 let qrCodeTimestamp = null;
-const QR_CODE_DURATION = 60000; // 60 segundos (aumentei o tempo)
+let connectionStatus = 'disconnected'; // disconnected, qr_received, authenticating, connected
+const QR_CODE_DURATION = 60000;
 
+// Logs detalhados de conexão
 client.on('qr', async (qr) => {
     const now = Date.now();
     
-    // Só gera novo QR Code se o anterior tiver mais de 60 segundos
     if (!qrCodeTimestamp || (now - qrCodeTimestamp) > QR_CODE_DURATION) {
-        console.log('🔄 Gerando NOVO QR Code...');
-        qrCodeTimestamp = now;
+        console.log('\n🔄 ========== NOVO QR CODE GERADO ==========');
+        console.log('⏰ Este QR Code será válido por 60 segundos');
+        console.log('📱 Escaneie rapidamente no WhatsApp');
+        console.log('==========================================\n');
         
-        // Gera o QR Code como imagem base64
+        connectionStatus = 'qr_received';
+        qrCodeTimestamp = now;
         qrCodeImage = await qrcode.toDataURL(qr);
         
-        console.log('✅ QR Code disponível em: /qrcode');
-        console.log('⏰ Este QR Code será válido por 60 segundos');
     } else {
         console.log('⏳ QR Code atual ainda é válido...');
     }
 });
 
-client.on('ready', () => {
-    isReady = true;
+client.on('authenticated', () => {
+    console.log('\n✅ ========== AUTENTICADO COM SUCESSO ==========');
+    console.log('📱 Sessão salva - Reconexão automática habilitada');
+    console.log('==============================================\n');
+    connectionStatus = 'authenticating';
+});
+
+client.on('auth_failure', msg => {
+    console.log('\n❌ ========== FALHA NA AUTENTICAÇÃO ==========');
+    console.log('Erro:', msg);
+    console.log('==========================================\n');
+    connectionStatus = 'disconnected';
     qrCodeImage = null;
     qrCodeTimestamp = null;
-    console.log('✅ WhatsApp conectado!');
+});
+
+client.on('ready', () => {
+    console.log('\n🎉 ========== WHATSAPP CONECTADO! ==========');
+    console.log('✅ Pronto para enviar mensagens');
+    console.log('⏰ Sessão persistente ativa');
+    console.log('🌐 Acesse: https://servidor-whatsapp-mhdo.onrender.com');
+    console.log('==========================================\n');
+    
+    isReady = true;
+    connectionStatus = 'connected';
+    qrCodeImage = null;
+    qrCodeTimestamp = null;
 });
 
 client.on('disconnected', (reason) => {
+    console.log('\n🔴 ========== WHATSAPP DESCONECTADO ==========');
+    console.log('Motivo:', reason);
+    console.log('❌ Reconectando automaticamente...');
+    console.log('============================================\n');
+    
     isReady = false;
+    connectionStatus = 'disconnected';
     qrCodeImage = null;
     qrCodeTimestamp = null;
-    console.log('❌ WhatsApp desconectado:', reason);
+    
+    // Tentativa de reconexão automática
+    setTimeout(() => {
+        console.log('🔄 Tentando reconectar...');
+        client.initialize();
+    }, 5000);
+});
+
+client.on('loading_screen', (percent, message) => {
+    console.log(`📱 Carregando: ${percent}% - ${message}`);
+    connectionStatus = 'loading';
 });
 
 // Rota para obter o QR Code como imagem
@@ -120,6 +177,7 @@ app.get('/', (req, res) => {
                 .connected { background: #4CAF50; }
                 .disconnected { background: #f44336; }
                 .waiting { background: #ff9800; }
+                .loading { background: #2196F3; }
                 .instructions {
                     text-align: left;
                     background: rgba(0,0,0,0.2);
@@ -140,11 +198,34 @@ app.get('/', (req, res) => {
                     margin: 10px 0;
                     font-size: 14px;
                 }
+                .connection-steps {
+                    display: flex;
+                    justify-content: space-between;
+                    margin: 20px 0;
+                }
+                .step {
+                    flex: 1;
+                    padding: 10px;
+                    margin: 0 5px;
+                    border-radius: 5px;
+                    background: rgba(255,255,255,0.1);
+                }
+                .step.active {
+                    background: #4CAF50;
+                    font-weight: bold;
+                }
             </style>
         </head>
         <body>
             <div class="container">
-                <h1>🔗 Conectar WhatsApp</h1>
+                <h1>🔗 Conectar WhatsApp - BeautyTime</h1>
+                
+                <div class="connection-steps">
+                    <div class="step" id="step1">1. QR Code</div>
+                    <div class="step" id="step2">2. Autenticação</div>
+                    <div class="step" id="step3">3. Conectado</div>
+                </div>
+                
                 <div class="status" id="status">
                     Aguardando QR Code...
                 </div>
@@ -168,6 +249,10 @@ app.get('/', (req, res) => {
                         <li>Escaneie o QR Code acima rapidamente</li>
                         <li>Aguarde a confirmação de conexão</li>
                     </ol>
+                </div>
+                
+                <div id="debug-info" style="font-size: 12px; margin-top: 20px; opacity: 0.8;">
+                    Status: <span id="debugStatus">-</span>
                 </div>
             </div>
 
@@ -202,12 +287,39 @@ app.get('/', (req, res) => {
                     }
                 }
 
+                function updateSteps(status) {
+                    // Reset all steps
+                    document.getElementById('step1').className = 'step';
+                    document.getElementById('step2').className = 'step';
+                    document.getElementById('step3').className = 'step';
+                    
+                    switch(status) {
+                        case 'qr_received':
+                            document.getElementById('step1').className = 'step active';
+                            break;
+                        case 'authenticating':
+                        case 'loading':
+                            document.getElementById('step1').className = 'step active';
+                            document.getElementById('step2').className = 'step active';
+                            break;
+                        case 'connected':
+                            document.getElementById('step1').className = 'step active';
+                            document.getElementById('step2').className = 'step active';
+                            document.getElementById('step3').className = 'step active';
+                            break;
+                    }
+                }
+
                 function atualizarStatus() {
                     fetch('/status')
                         .then(response => response.json())
                         .then(data => {
                             const statusElement = document.getElementById('status');
                             const qrTimerElement = document.getElementById('qrTimer');
+                            const debugElement = document.getElementById('debugStatus');
+                            
+                            debugElement.textContent = data.connectionStatus;
+                            updateSteps(data.connectionStatus);
                             
                             if (data.connected) {
                                 statusElement.innerHTML = '✅ WhatsApp Conectado!';
@@ -223,8 +335,16 @@ app.get('/', (req, res) => {
                                     qrTimerElement.style.display = 'block';
                                     atualizarQRCode();
                                     startCountdown();
+                                } else if (data.connectionStatus === 'loading') {
+                                    statusElement.innerHTML = '⏳ Carregando WhatsApp...';
+                                    statusElement.className = 'status loading';
+                                    qrTimerElement.style.display = 'none';
+                                } else if (data.connectionStatus === 'authenticating') {
+                                    statusElement.innerHTML = '🔐 Autenticando...';
+                                    statusElement.className = 'status loading';
+                                    qrTimerElement.style.display = 'none';
                                 } else {
-                                    statusElement.innerHTML = '⏳ Gerando QR Code...';
+                                    statusElement.innerHTML = '⏳ Aguardando QR Code...';
                                     statusElement.className = 'status disconnected';
                                     qrTimerElement.style.display = 'none';
                                 }
@@ -255,7 +375,7 @@ app.get('/', (req, res) => {
                         });
                 }
 
-                // Verificar status a cada 3 segundos (reduzido)
+                // Verificar status a cada 3 segundos
                 setInterval(atualizarStatus, 3000);
                 atualizarStatus();
             </script>
@@ -278,11 +398,14 @@ app.post('/send-message', async (req, res) => {
         const chatId = `${to.replace(/\D/g, '')}@c.us`;
         const result = await client.sendMessage(chatId, message);
         
+        console.log(`📤 Mensagem enviada para ${to}: ${message}`);
+        
         res.json({ 
             success: true, 
             messageId: result.id.id
         });
     } catch (error) {
+        console.error(`❌ Erro ao enviar mensagem: ${error.message}`);
         res.json({ 
             success: false, 
             error: error.message 
@@ -293,15 +416,29 @@ app.post('/send-message', async (req, res) => {
 app.get('/status', (req, res) => {
     res.json({ 
         connected: isReady,
-        qrAvailable: !!qrCodeImage
+        qrAvailable: !!qrCodeImage,
+        connectionStatus: connectionStatus
+    });
+});
+
+// Rota para debug
+app.get('/debug', (req, res) => {
+    res.json({
+        connected: isReady,
+        qrAvailable: !!qrCodeImage,
+        connectionStatus: connectionStatus,
+        qrCodeTimestamp: qrCodeTimestamp,
+        uptime: process.uptime()
     });
 });
 
 // Inicializar cliente
+console.log('🚀 Iniciando servidor WhatsApp...');
 client.initialize();
 
 const PORT = process.env.PORT || 3005;
 app.listen(PORT, () => {
-    console.log(`Servidor WhatsApp na porta ${PORT}`);
-    console.log(`Acesse: https://servidor-whatsapp-mhdo.onrender.com`);
+    console.log(`🌐 Servidor WhatsApp na porta ${PORT}`);
+    console.log(`📱 Acesse: https://servidor-whatsapp-mhdo.onrender.com`);
+    console.log(`🔍 Debug: https://servidor-whatsapp-mhdo.onrender.com/debug`);
 });
