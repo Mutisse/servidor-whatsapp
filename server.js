@@ -1,64 +1,77 @@
-const express = require("express");
-const { Client, LocalAuth } = require("whatsapp-web.js");
-const qrcode = require("qrcode");
-const path = require("path");
+const express = require('express');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode');
+const path = require('path');
 
 const app = express();
 app.use(express.json());
 
 const client = new Client({
     authStrategy: new LocalAuth(),
-    puppeteer: {
+    puppeteer: { 
         headless: true,
-        args: ["--no-sandbox", "--disable-setuid-sandbox"],
-    },
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
 });
 
 let isReady = false;
 let qrCodeImage = null;
+let qrCodeTimestamp = null;
+const QR_CODE_DURATION = 60000; // 60 segundos (aumentei o tempo)
 
-client.on("qr", async (qr) => {
-    console.log("QR Code recebido, gerando imagem...");
-
-    // Gera o QR Code como imagem base64
-    qrCodeImage = await qrcode.toDataURL(qr);
-
-    console.log("QR Code disponível em: /qrcode");
+client.on('qr', async (qr) => {
+    const now = Date.now();
+    
+    // Só gera novo QR Code se o anterior tiver mais de 60 segundos
+    if (!qrCodeTimestamp || (now - qrCodeTimestamp) > QR_CODE_DURATION) {
+        console.log('🔄 Gerando NOVO QR Code...');
+        qrCodeTimestamp = now;
+        
+        // Gera o QR Code como imagem base64
+        qrCodeImage = await qrcode.toDataURL(qr);
+        
+        console.log('✅ QR Code disponível em: /qrcode');
+        console.log('⏰ Este QR Code será válido por 60 segundos');
+    } else {
+        console.log('⏳ QR Code atual ainda é válido...');
+    }
 });
 
-client.on("ready", () => {
+client.on('ready', () => {
     isReady = true;
-    qrCodeImage = null; // Limpa o QR após conectar
-    console.log("WhatsApp conectado!");
+    qrCodeImage = null;
+    qrCodeTimestamp = null;
+    console.log('✅ WhatsApp conectado!');
 });
 
-client.on("disconnected", (reason) => {
+client.on('disconnected', (reason) => {
     isReady = false;
-    console.log("WhatsApp desconectado:", reason);
+    qrCodeImage = null;
+    qrCodeTimestamp = null;
+    console.log('❌ WhatsApp desconectado:', reason);
 });
 
 // Rota para obter o QR Code como imagem
-app.get("/qrcode", (req, res) => {
+app.get('/qrcode', (req, res) => {
     if (!qrCodeImage) {
-        return res.status(404).json({
-            error: "QR Code não disponível. Aguarde ou verifique o status.",
+        return res.status(404).json({ 
+            error: 'QR Code não disponível. Aguarde...' 
         });
     }
-
-    // Converte base64 para buffer e envia como imagem
-    const base64Data = qrCodeImage.replace(/^data:image\/png;base64,/, "");
-    const imgBuffer = Buffer.from(base64Data, "base64");
-
+    
+    const base64Data = qrCodeImage.replace(/^data:image\/png;base64,/, '');
+    const imgBuffer = Buffer.from(base64Data, 'base64');
+    
     res.writeHead(200, {
-        "Content-Type": "image/png",
-        "Content-Length": imgBuffer.length,
-        "Cache-Control": "no-cache",
+        'Content-Type': 'image/png',
+        'Content-Length': imgBuffer.length,
+        'Cache-Control': 'no-cache'
     });
     res.end(imgBuffer);
 });
 
 // Rota para página HTML com o QR Code
-app.get("/", (req, res) => {
+app.get('/', (req, res) => {
     res.send(`
         <!DOCTYPE html>
         <html>
@@ -106,6 +119,7 @@ app.get("/", (req, res) => {
                 }
                 .connected { background: #4CAF50; }
                 .disconnected { background: #f44336; }
+                .waiting { background: #ff9800; }
                 .instructions {
                     text-align: left;
                     background: rgba(0,0,0,0.2);
@@ -119,6 +133,13 @@ app.get("/", (req, res) => {
                 .instructions li {
                     margin: 8px 0;
                 }
+                .qr-timer {
+                    background: rgba(255,255,255,0.2);
+                    padding: 10px;
+                    border-radius: 5px;
+                    margin: 10px 0;
+                    font-size: 14px;
+                }
             </style>
         </head>
         <body>
@@ -128,8 +149,14 @@ app.get("/", (req, res) => {
                     Aguardando QR Code...
                 </div>
                 
+                <div class="qr-timer" id="qrTimer">
+                    ⏰ QR Code válido por: <span id="timer">60</span> segundos
+                </div>
+                
                 <div id="qrcode-container">
-                    <div id="qrcode"></div>
+                    <div id="qrcode">
+                        <p>⏳ Gerando QR Code...</p>
+                    </div>
                 </div>
                 
                 <div class="instructions">
@@ -138,33 +165,69 @@ app.get("/", (req, res) => {
                         <li>Abra o WhatsApp no seu celular</li>
                         <li>Toque em <strong>Menu → Linked Devices</strong></li>
                         <li>Toque em <strong>Link a Device</strong></li>
-                        <li>Escaneie o QR Code acima</li>
+                        <li>Escaneie o QR Code acima rapidamente</li>
                         <li>Aguarde a confirmação de conexão</li>
                     </ol>
-                </div>
-                
-                <div id="api-info">
-                    <h3>🌐 API Endpoints:</h3>
-                    <p><strong>POST /send-message</strong> - Enviar mensagem</p>
-                    <p><strong>GET /status</strong> - Status da conexão</p>
                 </div>
             </div>
 
             <script>
+                let countdown = 60;
+                let countdownInterval;
+
+                function startCountdown() {
+                    clearInterval(countdownInterval);
+                    countdown = 60;
+                    updateTimer();
+                    
+                    countdownInterval = setInterval(() => {
+                        countdown--;
+                        updateTimer();
+                        
+                        if (countdown <= 0) {
+                            clearInterval(countdownInterval);
+                            document.getElementById('qrTimer').innerHTML = '🔄 Atualizando QR Code...';
+                            setTimeout(() => {
+                                location.reload();
+                            }, 2000);
+                        }
+                    }, 1000);
+                }
+
+                function updateTimer() {
+                    document.getElementById('timer').textContent = countdown;
+                    
+                    if (countdown < 10) {
+                        document.getElementById('qrTimer').style.background = 'rgba(255,0,0,0.3)';
+                    }
+                }
+
                 function atualizarStatus() {
                     fetch('/status')
                         .then(response => response.json())
                         .then(data => {
                             const statusElement = document.getElementById('status');
+                            const qrTimerElement = document.getElementById('qrTimer');
+                            
                             if (data.connected) {
                                 statusElement.innerHTML = '✅ WhatsApp Conectado!';
                                 statusElement.className = 'status connected';
+                                qrTimerElement.style.display = 'none';
                                 document.getElementById('qrcode-container').innerHTML = 
                                     '<p>✅ Conexão estabelecida com sucesso!</p>';
+                                clearInterval(countdownInterval);
                             } else {
-                                statusElement.innerHTML = '⏳ Aguardando QR Code...';
-                                statusElement.className = 'status disconnected';
-                                atualizarQRCode();
+                                if (data.qrAvailable) {
+                                    statusElement.innerHTML = '📱 QR Code Disponível - Escaneie Rapidamente!';
+                                    statusElement.className = 'status waiting';
+                                    qrTimerElement.style.display = 'block';
+                                    atualizarQRCode();
+                                    startCountdown();
+                                } else {
+                                    statusElement.innerHTML = '⏳ Gerando QR Code...';
+                                    statusElement.className = 'status disconnected';
+                                    qrTimerElement.style.display = 'none';
+                                }
                             }
                         })
                         .catch(error => {
@@ -192,8 +255,8 @@ app.get("/", (req, res) => {
                         });
                 }
 
-                // Verificar status a cada 2 segundos
-                setInterval(atualizarStatus, 2000);
+                // Verificar status a cada 3 segundos (reduzido)
+                setInterval(atualizarStatus, 3000);
                 atualizarStatus();
             </script>
         </body>
@@ -202,35 +265,35 @@ app.get("/", (req, res) => {
 });
 
 // Suas rotas existentes
-app.post("/send-message", async (req, res) => {
+app.post('/send-message', async (req, res) => {
     if (!isReady) {
-        return res.json({
-            success: false,
-            error: "WhatsApp não conectado",
+        return res.json({ 
+            success: false, 
+            error: 'WhatsApp não conectado' 
         });
     }
 
     try {
         const { to, message } = req.body;
-        const chatId = `${to.replace(/\D/g, "")}@c.us`;
+        const chatId = `${to.replace(/\D/g, '')}@c.us`;
         const result = await client.sendMessage(chatId, message);
-
-        res.json({
-            success: true,
-            messageId: result.id.id,
+        
+        res.json({ 
+            success: true, 
+            messageId: result.id.id
         });
     } catch (error) {
-        res.json({
-            success: false,
-            error: error.message,
+        res.json({ 
+            success: false, 
+            error: error.message 
         });
     }
 });
 
-app.get("/status", (req, res) => {
-    res.json({
+app.get('/status', (req, res) => {
+    res.json({ 
         connected: isReady,
-        qrAvailable: !!qrCodeImage,
+        qrAvailable: !!qrCodeImage
     });
 });
 
